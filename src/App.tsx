@@ -59,9 +59,33 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
     }
 
     // Use proxied URL to bypass CORS and Mixed Content issues
-    const proxiedSrc = src.startsWith("http") 
-      ? `/api/stream?url=${encodeURIComponent(src)}`
-      : src;
+    // If the URL contains "url=" in its query parameter, we extract it to obtain the original high-speed direct CDN URL.
+    let finalSrc = src;
+    if (src.includes("url=")) {
+      try {
+        const urlObj = new URL(src);
+        const directUrl = urlObj.searchParams.get("url");
+        if (directUrl) {
+          finalSrc = directUrl;
+        }
+      } catch (e) {
+        try {
+          const urlObj = new URL(src, "https://example.com");
+          const directUrl = urlObj.searchParams.get("url");
+          if (directUrl) {
+            finalSrc = directUrl;
+          }
+        } catch (err) {}
+      }
+    }
+
+    const isHls = finalSrc.includes(".m3u8") || finalSrc.includes("m3u8") || finalSrc.includes("playlist");
+
+    // Only proxy if it is actually an HLS (.m3u8) stream. Normal MP4 files (like melolostatic CDN outputs) 
+    // are streamed directly by standard HTML5 <video> natively at maximum edge CDN speed without proxy lag.
+    const proxiedSrc = (isHls && finalSrc.startsWith("http")) 
+      ? `/api/stream?url=${encodeURIComponent(finalSrc)}`
+      : finalSrc;
 
     // Secure async helper to execute play
     const triggerPlay = async () => {
@@ -82,7 +106,11 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
       }
     };
 
-    if (Hls.isSupported()) {
+    const handleMetadata = () => {
+      triggerPlay();
+    };
+
+    if (isHls && Hls.isSupported()) {
       hls = new Hls({
         maxMaxBufferLength: 10,
         enableWorker: true,
@@ -116,26 +144,10 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
           }
         }
       });
-    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = proxiedSrc;
-      const handleMetadata = () => {
-        triggerPlay();
-      };
-      video.addEventListener("loadedmetadata", handleMetadata);
-
-      return () => {
-        isCancelled = true;
-        video.removeEventListener("loadedmetadata", handleMetadata);
-        try {
-          video.pause();
-          video.src = "";
-          video.load();
-        } catch (e) {
-          // Ignore
-        }
-      };
     } else {
-      setErrorMsg("Format stream HLS tidak didukung di web browser ini.");
+      // Direct assignment for standard MP4 or Apple HLS
+      video.src = proxiedSrc;
+      video.addEventListener("loadedmetadata", handleMetadata);
     }
 
     const handleEndedEvent = () => {
@@ -144,12 +156,13 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
 
     video.addEventListener("ended", handleEndedEvent);
 
-    // Secure unmount and cancellation handling
+    // Unified cleanup handling
     return () => {
       isCancelled = true;
       if (hls) {
         hls.destroy();
       }
+      video.removeEventListener("loadedmetadata", handleMetadata);
       video.removeEventListener("ended", handleEndedEvent);
       try {
         video.pause();
@@ -260,6 +273,7 @@ export default function App() {
   
   // Sidebar of episodes in player view (collapsed on mobile/smaller viewports for cleanliness)
   const [showEpisodesPanel, setShowEpisodesPanel] = useState<boolean>(true);
+  const [showMobileEpisodes, setShowMobileEpisodes] = useState<boolean>(false);
 
   // Bootstrapping lists on mounting
   useEffect(() => {
@@ -309,6 +323,7 @@ export default function App() {
     setHasLiked(false);
     setHasBookmarked(false);
     setIsHudVisible(true); // reset HUD on navigation
+    setShowMobileEpisodes(false);
     
     try {
       const res = await fetch(`/api/detail?slug=${drama.slug}`);
@@ -696,16 +711,23 @@ export default function App() {
             {/* Right quick controls */}
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setShowEpisodesPanel(!showEpisodesPanel)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowEpisodesPanel(!showEpisodesPanel);
+                  setShowMobileEpisodes(!showMobileEpisodes);
+                }}
                 className="cursor-pointer bg-black/45 hover:bg-black/70 rounded-xl px-3.5 py-2.5 text-xs font-black text-slate-300 border border-white/5 flex items-center gap-1.5 transition-all"
                 title="Daftar Episode"
               >
                 <Layers className="w-4 h-4 text-rose-500" />
-                <span className="hidden sm:inline">Episode ({selectedDrama?.total_episodes || 0})</span>
+                <span>Episode ({selectedDrama?.total_episodes || 0})</span>
               </button>
 
               <button
-                onClick={() => setIsHudVisible(false)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsHudVisible(false);
+                }}
                 className="cursor-pointer bg-rose-600/15 hover:bg-rose-600/30 border border-rose-500/20 text-rose-300 p-2.5 rounded-xl transition-all"
                 title="Sembunyikan HUD"
               >
@@ -725,16 +747,6 @@ export default function App() {
             )}
             <div className="absolute inset-0 bg-neutral-950/80" />
           </div>
-
-          {/* FLOATING DETACHED VISIBILITY HUD TRIGGER (When HUD is hidden, clicking this or anywhere reveals it) */}
-          {!isHudVisible && (
-            <button
-              onClick={() => setIsHudVisible(true)}
-              className="absolute top-5 right-5 z-50 p-3 rounded-2xl bg-black/60 hover:bg-black/85 text-white border border-white/10 shadow-lg shadow-black/40 transition-all cursor-pointer flex items-center gap-2 text-xxs font-black"
-            >
-              <Eye className="w-4 h-4 text-rose-500" /> Tampilkan Menu
-            </button>
-          )}
 
           {/* INSTRUCTION HUD TIP OVERLAY ONCE ENTERING VIEW */}
           {isHudVisible && (
@@ -982,33 +994,21 @@ export default function App() {
 
           </div>
 
-          {/* FLOATING MOBILE MENU TRIGGERS FOR EPISODES LIST */}
-          <div className="absolute bottom-4 right-4 z-40 flex items-center gap-2 md:hidden">
-            {/* Show episodes floating button */}
-            <button
-              onClick={() => {
-                const sheet = document.getElementById("episodes-bottom-sheet");
-                if (sheet) sheet.classList.toggle("translate-y-0");
-              }}
-              className="cursor-pointer bg-rose-600 text-white font-bold text-xs p-3.5 rounded-full shadow-lg shadow-rose-950/40 flex items-center gap-2 border border-rose-500"
-            >
-              <Layers className="w-4 h-4 fill-white" /> Episode
-            </button>
-          </div>
-
-          {/* SLIDING BOTTOM DRAWER FOR MOBILE VIEWPORTS ONLY */}
+          {/* SLIDING BOTTOM DRAWER FOR MOBILE VIEWPORTS ONLY (Managed purely with React State) */}
           <div 
-            id="episodes-bottom-sheet"
-            className="absolute bottom-0 left-0 right-0 z-50 bg-[#0c0e18] border-t border-slate-800 rounded-t-3xl p-5 transition-transform duration-300 translate-y-full md:hidden flex flex-col max-h-[360px]"
+            onClick={(e) => e.stopPropagation()}
+            className={`absolute bottom-0 left-0 right-0 z-50 bg-[#0c0e18] border-t border-slate-800 rounded-t-3xl p-5 transition-all duration-300 md:hidden flex flex-col max-h-[360px] ${
+              showMobileEpisodes ? "translate-y-0 opacity-100" : "translate-y-full opacity-0 pointer-events-none"
+            }`}
           >
             <div className="flex items-center justify-between pb-3.5 mb-3 border-b border-slate-800/80">
               <span className="text-xs font-black uppercase text-slate-300 flex items-center gap-2">
-                <Layers className="w-4 h-4 text-rose-500" /> Episode ({selectedDrama?.episodes?.length})
+                <Layers className="w-4 h-4 text-rose-500" /> Episode ({selectedDrama?.episodes?.length || selectedDrama?.total_episodes || 0})
               </span>
               <button 
-                onClick={() => {
-                  const sheet = document.getElementById("episodes-bottom-sheet");
-                  if (sheet) sheet.classList.add("translate-y-full");
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowMobileEpisodes(false);
                 }}
                 className="cursor-pointer text-slate-400 p-1 hover:text-white"
               >
@@ -1021,10 +1021,10 @@ export default function App() {
                 {selectedDrama?.episodes && selectedDrama.episodes.map((ep: any) => (
                   <button
                     key={ep.number}
-                    onClick={() => {
+                    onClick={(e) => {
+                      e.stopPropagation();
                       handleSelectEpisode(ep.number);
-                      const sheet = document.getElementById("episodes-bottom-sheet");
-                      if (sheet) sheet.classList.add("translate-y-full");
+                      setShowMobileEpisodes(false);
                     }}
                     className={`cursor-pointer py-3.5 text-xs font-black rounded-xl transition ${
                       selectedEp === ep.number

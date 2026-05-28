@@ -324,8 +324,11 @@ async function getVideoSourceWithFallback(
         addLog("error", `API Gagal (HTTP ${resp.status})`, `Mendeteksi kesalahan Gateway/Server. Melakukan fallback ke scraping HTML watch page...`);
       } else {
         const data = await resp.json() as any;
-        const playUrl = data.play_url || data.direct_play_url;
+        let playUrl = data.play_url || data.direct_play_url;
         if (playUrl) {
+          if (playUrl.startsWith("/")) {
+            playUrl = `${BASE_DOMAIN}${playUrl}`;
+          }
           logs.push(`✅ [API Success] Berhasil mendapatkan source URL dari API: ${playUrl}`);
           addLog("success", "API /refresh-source Berhasil", `Mode URL: ${data.play_url ? "Play URL" : "Direct Play"}`);
           return {
@@ -369,8 +372,17 @@ async function getVideoSourceWithFallback(
 
     if (sourceMatch && sourceMatch[1]) {
       let extractedUrl = sourceMatch[1];
-      // Decode escaped forward slashes e.g. \/ -> / dan unicode characters
-      extractedUrl = extractedUrl.replace(/\\\/|\\/g, "/").replace(/\\u0026/g, "&");
+      
+      // Decode escaped unicode sequences FIRST (e.g. \u0026 -> &) before transforming backslashes
+      extractedUrl = extractedUrl.replace(/\\u0026/gi, "&").replace(/u0026/gi, "&").replace(/\/u0026/gi, "&");
+      
+      // Decode escaped forward slashes e.g. \/ -> /
+      extractedUrl = extractedUrl.replace(/\\\/|\\/g, "/");
+      
+      // If the extracted URL is a relative path, make it absolute using BASE_DOMAIN
+      if (extractedUrl.startsWith("/")) {
+        extractedUrl = `${BASE_DOMAIN}${extractedUrl}`;
+      }
       
       logs.push(`🎉 [HTML Scraper Success] Berhasil mengekstrak initialSourceUrl dari HTML!`);
       logs.push(`👉 URL Ekstraksi: ${extractedUrl}`);
