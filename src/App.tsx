@@ -64,33 +64,42 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
       // Ignored
     }
 
-    // Use proxied URL to bypass CORS and Mixed Content issues
-    // If the URL contains "url=" in its query parameter, we extract it to obtain the original high-speed direct CDN URL.
-    let finalSrc = src;
-    if (src.includes("url=")) {
-      try {
-        const urlObj = new URL(src);
-        const directUrl = urlObj.searchParams.get("url");
-        if (directUrl) {
-          finalSrc = directUrl;
-        }
-      } catch (e) {
+    // Determine if it is HLS stream
+    const isHls = src.includes(".m3u8") || src.includes("m3u8") || src.includes("playlist");
+
+    let proxiedSrc = src;
+
+    if (isHls) {
+      // For HLS, if the URL contains "url=" in its query parameter, we extract the direct .m3u8 source
+      let finalSrc = src;
+      if (src.includes("url=")) {
         try {
-          const urlObj = new URL(src, "https://example.com");
+          const urlObj = new URL(src);
           const directUrl = urlObj.searchParams.get("url");
           if (directUrl) {
             finalSrc = directUrl;
           }
-        } catch (err) {}
+        } catch (e) {
+          try {
+            const urlObj = new URL(src, "https://example.com");
+            const directUrl = urlObj.searchParams.get("url");
+            if (directUrl) {
+              finalSrc = directUrl;
+            }
+          } catch (err) {}
+        }
       }
+      
+      // Proxy external HLS streaming playlist to bypass CORS on .m3u8 and segment fetches
+      proxiedSrc = finalSrc.startsWith("http") 
+        ? `/api/stream?url=${encodeURIComponent(finalSrc)}`
+        : finalSrc;
+    } else {
+      // For standard MP4 videos (like proxy-melolo URLs from narto-drama.com),
+      // we MUST use the source as-is without any extraction or rewriting, 
+      // allowing standard HTML5 <video> to stream natively with authorization parameters (like kid) intact.
+      proxiedSrc = src;
     }
-
-    const isHls = finalSrc.includes(".m3u8") || finalSrc.includes("m3u8") || finalSrc.includes("playlist");
-
-    // Always proxy external streaming URLs (HLS or MP4) through our local server to bypass CORS, Origin, and Referer protection.
-    const proxiedSrc = finalSrc.startsWith("http") 
-      ? `/api/stream?url=${encodeURIComponent(finalSrc)}`
-      : finalSrc;
 
     // Secure async helper to execute play
     const triggerPlay = async () => {
@@ -188,6 +197,19 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
     }
   }, [isMuted]);
 
+  // Gestures for tap-and-hold 2x playback speed acceleration
+  const [isSpeedingUp, setIsSpeedingUp] = useState(false);
+  const pressTimeoutRef = useRef<any>(null);
+  const isHoldingRef = useRef(false);
+  const startPressTimeRef = useRef(0);
+  const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.playbackRate = isSpeedingUp ? 2.0 : 1.0;
+    }
+  }, [isSpeedingUp]);
+
   const togglePlay = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -206,10 +228,91 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
     }
   };
 
+  const handlePressStart = (e: React.MouseEvent | React.TouchEvent) => {
+    // Only handle left clicks for mouse
+    if ('button' in e && e.button !== 0) return;
+    
+    isHoldingRef.current = true;
+    startPressTimeRef.current = Date.now();
+    
+    if ('touches' in e && e.touches[0]) {
+      touchStartPosRef.current = {
+        x: e.touches[0].clientX,
+        y: e.touches[0].clientY
+      };
+    } else {
+      touchStartPosRef.current = null;
+    }
+    
+    if (pressTimeoutRef.current) {
+      clearTimeout(pressTimeoutRef.current);
+    }
+
+    pressTimeoutRef.current = setTimeout(() => {
+      // Speed up only if we are still holding, video is playing and not paused
+      if (isHoldingRef.current && videoRef.current && isPlaying) {
+        setIsSpeedingUp(true);
+      }
+    }, 280);
+  };
+
+  const handlePressMove = (e: React.MouseEvent | React.TouchEvent) => {
+    if (!isHoldingRef.current) return;
+    
+    if (touchStartPosRef.current && 'touches' in e && e.touches[0]) {
+      const dx = e.touches[0].clientX - touchStartPosRef.current.x;
+      const dy = e.touches[0].clientY - touchStartPosRef.current.y;
+      // If moved more than 15px, consider it a scroll/swipe gesture instead of speedup hold
+      if (Math.sqrt(dx*dx + dy*dy) > 15) {
+        handlePressCancel();
+      }
+    }
+  };
+
+  const handlePressEnd = (e: React.MouseEvent | React.TouchEvent) => {
+    if (!isHoldingRef.current) return;
+    isHoldingRef.current = false;
+
+    if (pressTimeoutRef.current) {
+      clearTimeout(pressTimeoutRef.current);
+    }
+
+    const elapsed = Date.now() - startPressTimeRef.current;
+
+    if (isSpeedingUp) {
+      setIsSpeedingUp(false);
+    } else {
+      if (elapsed < 280) {
+        togglePlay();
+      }
+    }
+  };
+
+  const handlePressCancel = () => {
+    if (!isHoldingRef.current) return;
+    isHoldingRef.current = false;
+
+    if (pressTimeoutRef.current) {
+      clearTimeout(pressTimeoutRef.current);
+    }
+
+    setIsSpeedingUp(false);
+  };
+
   return (
-    <div className="relative w-full h-full bg-slate-950 overflow-hidden flex items-center justify-center">
+    <div 
+      className="relative w-full h-full bg-slate-950 overflow-hidden flex items-center justify-center select-none"
+      onMouseDown={handlePressStart}
+      onMouseUp={handlePressEnd}
+      onMouseLeave={handlePressCancel}
+      onTouchStart={handlePressStart}
+      onTouchMove={handlePressMove}
+      onTouchEnd={handlePressEnd}
+      onTouchCancel={handlePressCancel}
+      onContextMenu={(e) => e.preventDefault()}
+    >
       {errorMsg ? (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950 text-slate-300 p-6 text-center z-25">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950 text-slate-300 p-6 text-center z-25 pointer-events-none">
           <p className="font-semibold text-rose-500 text-xs">{errorMsg}</p>
           <p className="text-[10px] text-slate-500 mt-2 max-w-[200px]">
             Video bermasalah atau format tidak didukung pada browser ini.
@@ -219,19 +322,25 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
 
       <video
         ref={videoRef}
-        onClick={togglePlay}
-        className="w-full h-full object-cover cursor-pointer"
+        className="w-full h-full object-cover pointer-events-none"
         poster={poster || "https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=720&auto=format&fit=crop"}
         preload="auto"
         playsInline
         webkit-playsinline="true"
       />
 
+      {/* Speed acceleration overlay indicator */}
+      {isSpeedingUp && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 bg-black/85 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-rose-500/35 flex items-center gap-1.5 shadow-lg shadow-rose-950/20 pointer-events-none animate-pulse">
+          <Sparkles className="w-3.5 h-3.5 text-amber-400 fill-amber-400 animate-bounce" />
+          <span className="text-[9px] font-black tracking-tight text-rose-400 uppercase">⚡ 2× Kecepatan (Tahan)</span>
+        </div>
+      )}
+
       {/* Center aesthetic pause toggle representation */}
       {!isPlaying && (
         <div 
-          onClick={togglePlay}
-          className="absolute inset-0 flex items-center justify-center bg-black/40 cursor-pointer transition-all duration-300"
+          className="absolute inset-0 flex items-center justify-center bg-black/40 cursor-pointer transition-all duration-300 pointer-events-none"
         >
           <div className="w-16 h-16 rounded-full bg-white/10 backdrop-blur-md flex items-center justify-center text-white border border-white/20 scale-100 hover:scale-105 transition-transform duration-200">
             <Play className="w-8 h-8 fill-white translate-x-0.5 text-rose-500" />
@@ -285,6 +394,71 @@ export default function App() {
   // Sidebar of episodes in player view (collapsed on mobile/smaller viewports for cleanliness)
   const [showEpisodesPanel, setShowEpisodesPanel] = useState<boolean>(true);
   const [showMobileEpisodes, setShowMobileEpisodes] = useState<boolean>(false);
+
+  // Swiping & Wheel scroll cooldown for switching episodes (next/prev pages of action)
+  const lastScrollTimeRef = useRef<number>(0);
+  const touchStartYRef = useRef<number | null>(null);
+
+  const handlePlayerWheel = (e: React.WheelEvent) => {
+    const now = Date.now();
+    if (now - lastScrollTimeRef.current < 1200) {
+      return; // prevent fast-skipped scrolls
+    }
+
+    if (Math.abs(e.deltaY) < 15) {
+      return; 
+    }
+
+    if (e.deltaY > 0) {
+      // Scroll Down -> Next episode
+      if (selectedDrama && selectedEp < selectedDrama.total_episodes) {
+        lastScrollTimeRef.current = now;
+        handleNextEp();
+      }
+    } else {
+      // Scroll Up -> Previous episode
+      if (selectedDrama && selectedEp > 1) {
+        lastScrollTimeRef.current = now;
+        handlePrevEp();
+      }
+    }
+  };
+
+  const handlePlayerTouchStart = (e: React.TouchEvent) => {
+    if (e.touches && e.touches[0]) {
+      touchStartYRef.current = e.touches[0].clientY;
+    }
+  };
+
+  const handlePlayerTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartYRef.current === null) return;
+    if (!e.changedTouches || !e.changedTouches[0]) return;
+
+    const deltaY = e.changedTouches[0].clientY - touchStartYRef.current;
+    touchStartYRef.current = null;
+
+    const now = Date.now();
+    if (now - lastScrollTimeRef.current < 1200) {
+      return;
+    }
+
+    const minSwipeDistance = 40; // in pixels
+    if (Math.abs(deltaY) > minSwipeDistance) {
+      if (deltaY < 0) {
+        // Swipe up (finger moves up, content goes down) -> Next episode
+        if (selectedDrama && selectedEp < selectedDrama.total_episodes) {
+          lastScrollTimeRef.current = now;
+          handleNextEp();
+        }
+      } else {
+        // Swipe down (finger moves down, content goes up) -> Previous episode
+        if (selectedDrama && selectedEp > 1) {
+          lastScrollTimeRef.current = now;
+          handlePrevEp();
+        }
+      }
+    }
+  };
 
   // Bootstrapping lists on mounting
   useEffect(() => {
@@ -761,9 +935,14 @@ export default function App() {
 
           {/* INSTRUCTION HUD TIP OVERLAY ONCE ENTERING VIEW */}
           {isHudVisible && (
-            <div className="absolute bottom-4 left-4 z-40 bg-black/75 backdrop-blur-md rounded-xl p-2 px-3 border border-slate-800/60 hidden md:flex items-center gap-2 text-slate-400 text-[10px] pointer-events-none max-w-xs leading-tight">
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              Tip: HUD/Header dapat disembunyikan/dimunculkan lewat tombol mata di kanan atas untuk tontonan super imersif!
+            <div className="absolute bottom-4 left-4 z-40 bg-black/75 backdrop-blur-md rounded-xl p-2.5 px-3.5 border border-slate-800/60 hidden md:flex flex-col gap-1 text-slate-300 text-[10px] pointer-events-none max-w-xs leading-tight animate-fade-in">
+              <div className="flex items-center gap-1.5 font-black text-rose-400 uppercase tracking-tight">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400 fill-amber-300 animate-bounce" />
+                <span>Navigasi Teater Cepat</span>
+              </div>
+              <p className="text-slate-400">• Sembunyikan HUD lewat tombol mata kanan atas.</p>
+              <p className="text-slate-400">• <b>Scroll mouse / swipe layar</b> untuk episode berikutnya/sebelumnya.</p>
+              <p className="text-slate-400">• <b>Ketuk & tahan layar video</b> untuk mempercepat playback 2x!</p>
             </div>
           )}
 
@@ -777,7 +956,10 @@ export default function App() {
                 
                 {/* PORTRAIT CORE VIDEO CONTAINER - FULL HEIGHT AND IMMERSIVE PORTRAIT */}
                 <div 
-                  className="relative w-full h-full sm:rounded-3xl border-0 sm:border-4 border-slate-900 bg-black overflow-hidden shadow-2xl flex items-center justify-center"
+                  className="relative w-full h-full sm:rounded-3xl border-0 sm:border-4 border-slate-900 bg-black overflow-hidden shadow-2xl flex items-center justify-center cursor-ns-resize"
+                  onWheel={handlePlayerWheel}
+                  onTouchStart={handlePlayerTouchStart}
+                  onTouchEnd={handlePlayerTouchEnd}
                   onClick={() => {
                     // Clicking the empty space inside player can also cycle HUD visibility for dynamic comfort!
                     setIsHudVisible(!isHudVisible);
