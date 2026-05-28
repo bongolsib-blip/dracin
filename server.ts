@@ -487,6 +487,12 @@ app.get("/api/stream", async (req, res) => {
 // VITE CLIENT INTEGRATION
 // =========================
 async function startServer() {
+  if (process.env.VERCEL) {
+    // Di lingkungan serverless Vercel, file statis dilayani langsung oleh CDN Vercel,
+    // jadi kita tidak perlu memount middleware Vite atau file statis.
+    return;
+  }
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -507,3 +513,5 @@ async function startServer() {
 }
 
 startServer();
+
+export default app;
