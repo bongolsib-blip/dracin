@@ -1,0 +1,6 @@
+{
+  "name": "Drama Scraper & HLS Fallback",
+  "description": "API scraping and fallback solution with HTML parsing for Narto Drama content streaming",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
