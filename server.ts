@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import * as cheerio from "cheerio";
+import { Readable } from "stream";
 
 const app = express();
 const PORT = 3000;
@@ -264,6 +265,16 @@ app.get("/api/detail", async (req, res) => {
       }
     }
 
+    // Guarantee there is always at least 1 clickable option in the collection so UI buttons remain active
+    if (episodes.length === 0) {
+      totalEpisodes = 1;
+      episodes.push({
+        label: "1",
+        number: 1,
+        isActive: true
+      });
+    }
+
     addLog("success", `Detail drama "${title || slug}" terbaca (${totalEpisodes} Episode)`);
     res.json({
       title: title || slug.replace(/-/g, " "),
@@ -308,20 +319,91 @@ async function getVideoSourceWithFallback(
   const logs: string[] = [];
   logs.push(`🔍 Memulai pencarian video source untuk: ${slug} (Eps ${ep})`);
 
-  // Target refresh-source endpoint
+  const watchUrl = `${BASE_DOMAIN}/detail/watch/${slug}/${ep}?lang=id-ID`;
   const refreshUrl = `${BASE_DOMAIN}/detail/watch/${slug}/${ep}/refresh-source?lang=id-ID&force=1`;
 
+  let cookies = "";
+  let initialSourceFromHtml: string | null = null;
+
+  // STEP 1: Fetch the watch page HTML to establish session & get cookies
+  try {
+    logs.push(`📥 Mengunduh kode HTML halaman tonton untuk menginisialisasi sesi & cookie: ${watchUrl}`);
+    const watchResp = await fetch(watchUrl, { 
+      headers: {
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": HEADERS["Accept-Language"],
+        "Referer": `${BASE_DOMAIN}/`
+      } 
+    });
+
+    if (watchResp.status === 200) {
+      // Collect cookies from the response headers
+      const rawCookies = typeof (watchResp.headers as any).getSetCookie === "function"
+        ? (watchResp.headers as any).getSetCookie()
+        : (watchResp.headers.get("set-cookie") ? [watchResp.headers.get("set-cookie")] : []);
+      
+      const parsedCookies: Record<string, string> = {};
+      for (const cookieStr of rawCookies) {
+        if (!cookieStr) continue;
+        const parts = cookieStr.split(";");
+        const entry = parts[0];
+        const eqIdx = entry.indexOf("=");
+        if (eqIdx > 0) {
+          const key = entry.substring(0, eqIdx).trim();
+          const val = entry.substring(eqIdx + 1).trim();
+          parsedCookies[key] = val;
+        }
+      }
+
+      cookies = Object.entries(parsedCookies).map(([k, v]) => `${k}=${v}`).join("; ");
+      logs.push(`🍪 Cookie sesi berhasil direkam: ${cookies ? "Ada (" + Object.keys(parsedCookies).length + " keys)" : "Kosong"}`);
+
+      // Extract initialSourceUrl from the HTML body as solid fallback
+      const html = await watchResp.text();
+      const sourceRegex = /const\s+initialSourceUrl\s*=\s*["']([^"']+)["']/;
+      const sourceMatch = html.match(sourceRegex);
+      if (sourceMatch && sourceMatch[1]) {
+        let extracted = sourceMatch[1];
+        extracted = extracted.replace(/\\u0026/gi, "&").replace(/u0026/gi, "&").replace(/\/u0026/gi, "&");
+        extracted = extracted.replace(/\\\/|\\/g, "/");
+        if (extracted.startsWith("/")) {
+          extracted = `${BASE_DOMAIN}${extracted}`;
+        }
+        initialSourceFromHtml = extracted;
+        logs.push(`📑 Menemukan initialSourceUrl dari HTML sebagai cadangan: ${initialSourceFromHtml}`);
+      }
+    } else {
+      logs.push(`⚠️ Gagal memuat HTML tonton. Status HTTP: ${watchResp.status}`);
+    }
+  } catch (err: any) {
+    logs.push(`⚠️ Terjadi kesalahan saat memuat halaman sesi: ${err.message}`);
+  }
+
+  // STEP 2: Call the API /refresh-source with established cookies & AJAX headers
   if (simulate502) {
-    logs.push(`⚠️ SIMULATED 502 ACTIVE: Melompati API /refresh-source langsung ke HTML Fallback.`);
-    addLog("warn", "Simulasi 502 Diaktifkan", `Bypass API /refresh-source langsung ke scraping HTML untuk episode ${ep}`);
+    logs.push(`⚠️ SIMULATED 502 ACTIVE: Melewati pemanggilan API refresh-source.`);
   } else {
     try {
-      logs.push(`📡 Mencoba memanggil API: ${refreshUrl}`);
-      const resp = await fetch(refreshUrl, { headers: HEADERS });
+      logs.push(`📡 Mencoba memanggil API refresh-source dengan sesi & headers AJAX: ${refreshUrl}`);
+      
+      const apiHeaders: Record<string, string> = {
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "application/json",
+        "Accept-Language": HEADERS["Accept-Language"],
+        "Referer": watchUrl,
+        "X-Requested-With": "XMLHttpRequest",
+      };
+
+      if (cookies) {
+        apiHeaders["Cookie"] = cookies;
+      }
+
+      const resp = await fetch(refreshUrl, { headers: apiHeaders });
       
       if (resp.status !== 200) {
         logs.push(`❌ [API Error] Server mengembalikan HTTP ${resp.status} ${resp.statusText}`);
-        addLog("error", `API Gagal (HTTP ${resp.status})`, `Mendeteksi kesalahan Gateway/Server. Melakukan fallback ke scraping HTML watch page...`);
+        addLog("error", `API Gagal (HTTP ${resp.status})`, `Mendeteksi kesalahan Gateway/Server.`);
       } else {
         const data = await resp.json() as any;
         let playUrl = data.play_url || data.direct_play_url;
@@ -329,8 +411,9 @@ async function getVideoSourceWithFallback(
           if (playUrl.startsWith("/")) {
             playUrl = `${BASE_DOMAIN}${playUrl}`;
           }
-          logs.push(`✅ [API Success] Berhasil mendapatkan source URL dari API: ${playUrl}`);
-          addLog("success", "API /refresh-source Berhasil", `Mode URL: ${data.play_url ? "Play URL" : "Direct Play"}`);
+          logs.push(`🎉 [API Success] Berhasil mendapatkan source URL dari API /refresh-source!`);
+          logs.push(`👉 URL Streaming: ${playUrl}`);
+          addLog("success", "API /refresh-source Sukses Berhasil", `Sesi & AJAX aktif. Mode URL: ${data.play_url ? "Play" : "Direct"}`);
           return {
             videoUrl: playUrl,
             mode: "api",
@@ -339,69 +422,29 @@ async function getVideoSourceWithFallback(
           };
         } else {
           logs.push(`⚠️ [API Warning] Respons API sukses (200), tetapi 'play_url' atau 'direct_play_url' kosong.`);
-          addLog("warn", "API Return Kosong", "API sukses tetapi link streaming kosong. Mencoba fallback...");
+          addLog("warn", "API Return Kosong", "API sukses tetapi link streaming kosong.");
         }
       }
     } catch (err: any) {
       logs.push(`❌ [API Network Error] Gagal fetch API: ${err.message}`);
-      addLog("error", "API Network Error", `${err.message}. Mencoba fallback...`);
+      addLog("error", "API Network Error", `${err.message}.`);
     }
   }
 
-  // ==========================================
-  // THE LEGENDARY HTML SCRAPING FALLBACK
-  // ==========================================
-  logs.push(`🔄 KICKING OFF SCRAPER HTML FALLBACK...`);
-  const watchUrl = `${BASE_DOMAIN}/detail/watch/${slug}/${ep}?lang=id-ID`;
-  logs.push(`📥 Mengunduh kode HTML halaman tonton langsung dari: ${watchUrl}`);
-
-  try {
-    const rawHtmlResp = await fetch(watchUrl, { headers: HEADERS });
-    if (rawHtmlResp.status !== 200) {
-      logs.push(`❌ [HTML Scraper Error] Gagal mengunduh halaman tonton. Status HTTP: ${rawHtmlResp.status}`);
-      addLog("error", "HTML Scraper Gagal", `HTTP status: ${rawHtmlResp.status}`);
-      return { videoUrl: null, mode: "fallback", wasSuccessful: false, logs };
-    }
-
-    const html = await rawHtmlResp.text();
-    logs.push(`📑 HTML sukses diunduh (${html.length} bytes). Memindai script tonton...`);
-
-    // Guna regex untuk mencari initialSourceUrl di dalam text javascript
-    const sourceRegex = /const\s+initialSourceUrl\s*=\s*["']([^"']+)["']/;
-    const sourceMatch = html.match(sourceRegex);
-
-    if (sourceMatch && sourceMatch[1]) {
-      let extractedUrl = sourceMatch[1];
-      
-      // Decode escaped unicode sequences FIRST (e.g. \u0026 -> &) before transforming backslashes
-      extractedUrl = extractedUrl.replace(/\\u0026/gi, "&").replace(/u0026/gi, "&").replace(/\/u0026/gi, "&");
-      
-      // Decode escaped forward slashes e.g. \/ -> /
-      extractedUrl = extractedUrl.replace(/\\\/|\\/g, "/");
-      
-      // If the extracted URL is a relative path, make it absolute using BASE_DOMAIN
-      if (extractedUrl.startsWith("/")) {
-        extractedUrl = `${BASE_DOMAIN}${extractedUrl}`;
-      }
-      
-      logs.push(`🎉 [HTML Scraper Success] Berhasil mengekstrak initialSourceUrl dari HTML!`);
-      logs.push(`👉 URL Ekstraksi: ${extractedUrl}`);
-      addLog("success", "HTML Scraper Berhasil!", `Bypass 502 sukses! Mengekstrak: ${extractedUrl.substring(0, 60)}...`);
-      return {
-        videoUrl: extractedUrl,
-        mode: "fallback",
-        wasSuccessful: true,
-        logs
-      };
-    } else {
-      logs.push(`❌ [HTML Scraper Error] Variabel 'initialSourceUrl' TIDAK ditemukan dalam HTML watch page.`);
-      addLog("error", "Scraper Gagal", "Variabel initialSourceUrl tidak ditemukan di script HTML.");
-    }
-  } catch (scrapError: any) {
-    logs.push(`❌ [HTML Scraper Error Fatal] Terjadi exception: ${scrapError.message}`);
-    addLog("error", "Exception Scraping HTML watch page", scrapError.message);
+  // STEP 3: Fallback to initial source from HTML if API didn't succeed
+  if (initialSourceFromHtml) {
+    logs.push(`🎉 [Fallback Success] Menggunakan cadangan initialSourceUrl dari HTML.`);
+    addLog("success", "Fallback HTML Sukses", `Stream berhasil diambil dari HTML watch page.`);
+    return {
+      videoUrl: initialSourceFromHtml,
+      mode: "fallback",
+      wasSuccessful: true,
+      logs
+    };
   }
 
+  logs.push(`❌ Gagal mendapatkan link video dari API maupun HTML.`);
+  addLog("error", "Semua Metode Gagal", "Gagal mendapatkan videoUrl.");
   return {
     videoUrl: null,
     mode: "fallback",
@@ -430,8 +473,17 @@ app.get("/api/stream", async (req, res) => {
     fetchHeaders["Range"] = req.headers.range;
   }
 
+  // Set up AbortController to terminate downstream fetch if the client aborts or closes connection
+  const abortController = new AbortController();
+  req.on("close", () => {
+    abortController.abort();
+  });
+
   try {
-    const response = await fetch(decodedUrl, { headers: fetchHeaders });
+    const response = await fetch(decodedUrl, { 
+      headers: fetchHeaders,
+      signal: abortController.signal
+    });
     
     // Set response headers
     const contentType = response.headers.get("content-type") || "video/mp2t";
@@ -475,21 +527,21 @@ app.get("/api/stream", async (req, res) => {
       return res.send(rewrittenLines.join("\n"));
     }
 
-    // Pipe response bodies for actual .ts media chunks
+    // Pipe response bodies for actual media assets (MP4 or .ts chunks) natively via stream pipeline
     if (response.body) {
-      const reader = response.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(value);
-      }
-      res.end();
+      Readable.fromWeb(response.body as any).pipe(res);
     } else {
-      res.send();
+      res.end();
     }
   } catch (error: any) {
+    if (error.name === "AbortError") {
+      // Direct stream cancellation - ignored safely
+      return;
+    }
     console.error("General Stream proxy error:", error);
-    res.status(500).send(error.message);
+    if (!res.headersSent) {
+      res.status(500).send(error.message);
+    }
   }
 });
 

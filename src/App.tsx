@@ -43,6 +43,12 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
 
+  // Keep a stable ref of the callback to avoid re-triggering player load effects when parents recreate handlers
+  const onEndedRef = useRef(onEnded);
+  useEffect(() => {
+    onEndedRef.current = onEnded;
+  }, [onEnded]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -99,7 +105,9 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
           }
         }
       } catch (err: any) {
-        console.warn("Play interrupted safely & resolved correctly:", err.message);
+        if (err.name !== "AbortError") {
+          console.error("Video play failed:", err.message);
+        }
         if (!isCancelled) {
           setIsPlaying(false);
         }
@@ -151,7 +159,7 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
     }
 
     const handleEndedEvent = () => {
-      if (onEnded) onEnded();
+      if (onEndedRef.current) onEndedRef.current();
     };
 
     video.addEventListener("ended", handleEndedEvent);
@@ -172,7 +180,7 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
         // Ignore
       }
     };
-  }, [src, onEnded]);
+  }, [src]);
 
   // Handle mute alterations dynamically without invoking load
   useEffect(() => {
@@ -188,7 +196,11 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
     if (video.paused) {
       video.play()
         .then(() => setIsPlaying(true))
-        .catch(err => console.log("Play trigger error:", err));
+        .catch(err => {
+          if (err.name !== "AbortError") {
+            console.error("Manual play triggered error:", err);
+          }
+        });
     } else {
       video.pause();
       setIsPlaying(false);
@@ -927,7 +939,7 @@ export default function App() {
               {/* SLIDING/TOGGLEABLE RIGHT DRAWER PANEL: SERIES EPISODES IN PLAYBACK (HUD Toggleable) */}
               {showEpisodesPanel && (
                 <div className={`hidden md:flex flex-col w-[360px] h-[calc(100vh-140px)] max-h-[720px] bg-slate-900/80 backdrop-blur-md border border-slate-800 rounded-3xl p-5 shadow-2xl transition-all duration-300 ${
-                  isHudVisible ? "opacity-100 translate-x-0" : "opacity-20 translate-x-3 pointer-events-none"
+                  isHudVisible ? "opacity-100 translate-x-0 pointer-events-auto" : "opacity-20 translate-x-3 pointer-events-none"
                 }`}>
                   
                   {/* Panel navigation header */}
@@ -948,21 +960,28 @@ export default function App() {
 
                   {/* Main Grid listing of selectable episodes */}
                   <div className="flex-1 overflow-y-auto pr-1.5 space-y-1">
-                    <div className="grid grid-cols-4 gap-2">
-                      {selectedDrama?.episodes && selectedDrama.episodes.map((ep: any) => (
-                        <button
-                          key={ep.number}
-                          onClick={() => handleSelectEpisode(ep.number)}
-                          className={`cursor-pointer py-3 px-1 rounded-xl text-xs font-black font-sans transition-all text-center ${
-                            selectedEp === ep.number
-                              ? "bg-gradient-to-tr from-rose-600 to-amber-500 text-white shadow-lg shadow-rose-600/25 ring-1 ring-rose-400/30 scale-105"
-                              : "bg-slate-950/80 border border-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-850"
-                          }`}
-                        >
-                          {ep.number}
-                        </button>
-                      ))}
-                    </div>
+                    {isLoadingDetail ? (
+                      <div className="flex flex-col items-center justify-center py-20 text-slate-400 gap-3">
+                        <Loader2 className="w-8 h-8 animate-spin text-rose-500" />
+                        <span className="text-[10px] font-bold tracking-tight animate-pulse text-slate-500 uppercase">Memuat Episode...</span>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-4 gap-2">
+                        {selectedDrama?.episodes && selectedDrama.episodes.map((ep: any) => (
+                          <button
+                            key={ep.number}
+                            onClick={() => handleSelectEpisode(ep.number)}
+                            className={`cursor-pointer py-3 px-1 rounded-xl text-xs font-black font-sans transition-all text-center ${
+                              selectedEp === ep.number
+                                ? "bg-gradient-to-tr from-rose-600 to-amber-500 text-white shadow-lg shadow-rose-600/25 ring-1 ring-rose-400/30 scale-105"
+                                : "bg-slate-950/80 border border-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-850"
+                            }`}
+                          >
+                            {ep.number}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* Miniature Poster Meta inside control side-rail */}
@@ -998,7 +1017,7 @@ export default function App() {
           <div 
             onClick={(e) => e.stopPropagation()}
             className={`absolute bottom-0 left-0 right-0 z-50 bg-[#0c0e18] border-t border-slate-800 rounded-t-3xl p-5 transition-all duration-300 md:hidden flex flex-col max-h-[360px] ${
-              showMobileEpisodes ? "translate-y-0 opacity-100" : "translate-y-full opacity-0 pointer-events-none"
+              showMobileEpisodes ? "translate-y-0 opacity-100 pointer-events-auto" : "translate-y-full opacity-0 pointer-events-none"
             }`}
           >
             <div className="flex items-center justify-between pb-3.5 mb-3 border-b border-slate-800/80">
@@ -1017,25 +1036,32 @@ export default function App() {
             </div>
 
             <div className="overflow-y-auto flex-1 pb-4">
-              <div className="grid grid-cols-5 gap-2 pb-6">
-                {selectedDrama?.episodes && selectedDrama.episodes.map((ep: any) => (
-                  <button
-                    key={ep.number}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleSelectEpisode(ep.number);
-                      setShowMobileEpisodes(false);
-                    }}
-                    className={`cursor-pointer py-3.5 text-xs font-black rounded-xl transition ${
-                      selectedEp === ep.number
-                        ? "bg-gradient-to-tr from-rose-600 to-amber-500 text-white"
-                        : "bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    {ep.number}
-                  </button>
-                ))}
-              </div>
+              {isLoadingDetail ? (
+                <div className="flex flex-col items-center justify-center py-10 gap-3 text-slate-400">
+                  <Loader2 className="w-7 h-7 animate-spin text-rose-500" />
+                  <span className="text-[10px] font-bold tracking-tight animate-pulse text-slate-500 uppercase">Memuat Episode...</span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-5 gap-2 pb-6">
+                  {selectedDrama?.episodes && selectedDrama.episodes.map((ep: any) => (
+                    <button
+                      key={ep.number}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleSelectEpisode(ep.number);
+                        setShowMobileEpisodes(false);
+                      }}
+                      className={`cursor-pointer py-3.5 text-xs font-black rounded-xl transition ${
+                        selectedEp === ep.number
+                          ? "bg-gradient-to-tr from-rose-600 to-amber-500 text-white"
+                          : "bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      {ep.number}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
