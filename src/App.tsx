@@ -87,9 +87,8 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
 
     const isHls = finalSrc.includes(".m3u8") || finalSrc.includes("m3u8") || finalSrc.includes("playlist");
 
-    // Only proxy if it is actually an HLS (.m3u8) stream. Normal MP4 files (like melolostatic CDN outputs) 
-    // are streamed directly by standard HTML5 <video> natively at maximum edge CDN speed without proxy lag.
-    const proxiedSrc = (isHls && finalSrc.startsWith("http")) 
+    // Always proxy external streaming URLs (HLS or MP4) through our local server to bypass CORS, Origin, and Referer protection.
+    const proxiedSrc = finalSrc.startsWith("http") 
       ? `/api/stream?url=${encodeURIComponent(finalSrc)}`
       : finalSrc;
 
@@ -356,7 +355,7 @@ export default function App() {
     setPlaybackUrl(null);
     
     try {
-      const res = await fetch(`/api/video?slug=${slug}&ep=${ep}&simulate502=true`);
+      const res = await fetch(`/api/video?slug=${slug}&ep=${ep}`);
       const data = await res.json();
       setPlaybackUrl(data.videoUrl);
     } catch (err) {
