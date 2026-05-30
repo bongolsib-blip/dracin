@@ -132,7 +132,19 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded, onPlaying, sessionCo
         if (err.name !== "AbortError") {
           console.error("Video play failed:", err.message);
         }
-        if (!isCancelled) {
+        if (err.name === "NotAllowedError" && !video.muted) {
+          console.log("Autoplay blocked. Trying muted autoplay fallback.");
+          try {
+            video.muted = true;
+            await video.play();
+            if (!isCancelled) {
+              setIsPlaying(true);
+              setIsVideoLoading(false);
+            }
+          } catch (retryErr) {
+            console.error("Muted autoplay also failed:", retryErr);
+          }
+        } else if (!isCancelled) {
           setIsPlaying(false);
           setIsVideoLoading(false);
         }
@@ -241,23 +253,22 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded, onPlaying, sessionCo
       }
     };
 
+    const handleEndedEvent = () => {
+      if (onEndedRef.current) onEndedRef.current();
+    };
+
     video.addEventListener("waiting", handleWaiting);
     video.addEventListener("playing", handlePlaying);
     video.addEventListener("seeking", handleSeeking);
     video.addEventListener("seeked", handleSeeked);
     video.addEventListener("canplay", handleCanPlay);
     video.addEventListener("timeupdate", handleTimeUpdate);
+    video.addEventListener("loadedmetadata", handleMetadata);
+    video.addEventListener("error", handleNativeError);
+    video.addEventListener("ended", handleEndedEvent);
 
     // Prioritas: putar URL langsung tanpa melalui HLS.js terlebih dahulu
     video.src = proxiedSrc;
-    video.addEventListener("loadedmetadata", handleMetadata);
-    video.addEventListener("error", handleNativeError);
-
-    const handleEndedEvent = () => {
-      if (onEndedRef.current) onEndedRef.current();
-    };
-
-    video.addEventListener("ended", handleEndedEvent);
 
     // Unified cleanup handling
     return () => {
@@ -284,7 +295,7 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded, onPlaying, sessionCo
         // Ignore
       }
     };
-  }, [src]);
+  }, [src, sessionCookies]);
 
   // Handle mute alterations dynamically without invoking load
   useEffect(() => {
