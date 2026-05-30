@@ -23,7 +23,17 @@ import {
   EyeOff,
   TrendingUp,
   Award,
-  Clapperboard
+  Clapperboard,
+  Terminal,
+  Copy,
+  Download,
+  RefreshCw,
+  FileCode,
+  Activity,
+  Check,
+  Zap,
+  Cpu,
+  Server
 } from "lucide-react";
 import Hls from "hls.js";
 
@@ -36,24 +46,33 @@ interface HlsPlayerProps {
   poster?: string;
   isMuted?: boolean;
   onEnded?: () => void;
+  onPlaying?: () => void;
 }
 
-function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
+function HlsPlayer({ src, poster, isMuted = false, onEnded, onPlaying }: HlsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isVideoLoading, setIsVideoLoading] = useState(true);
 
   // Keep a stable ref of the callback to avoid re-triggering player load effects when parents recreate handlers
   const onEndedRef = useRef(onEnded);
+  const onPlayingRef = useRef(onPlaying);
+  
   useEffect(() => {
     onEndedRef.current = onEnded;
   }, [onEnded]);
+
+  useEffect(() => {
+    onPlayingRef.current = onPlaying;
+  }, [onPlaying]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     setErrorMsg(null);
+    setIsVideoLoading(true);
     let hls: Hls | null = null;
     let isCancelled = false;
 
@@ -69,39 +88,32 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
 
     let proxiedSrc = src;
 
-    if (isHls) {
-      // For HLS, if the URL contains "url=" in its query parameter, we extract the direct .m3u8 source
-      let finalSrc = src;
-      if (src.includes("url=")) {
+    // Parse and extract direct source if nested (useful for proxy-melolo formats)
+    let finalSrc = src;
+    if (src.includes("url=")) {
+      try {
+        const urlObj = new URL(src);
+        const directUrl = urlObj.searchParams.get("url");
+        if (directUrl) {
+          finalSrc = directUrl;
+        }
+      } catch (e) {
         try {
-          const urlObj = new URL(src);
+          const urlObj = new URL(src, "https://example.com");
           const directUrl = urlObj.searchParams.get("url");
           if (directUrl) {
             finalSrc = directUrl;
           }
-        } catch (e) {
-          try {
-            const urlObj = new URL(src, "https://example.com");
-            const directUrl = urlObj.searchParams.get("url");
-            if (directUrl) {
-              finalSrc = directUrl;
-            }
-          } catch (err) {}
-        }
+        } catch (err) {}
       }
-      
-      // Proxy external HLS streaming playlist to bypass CORS on .m3u8 and segment fetches
-      proxiedSrc = finalSrc.startsWith("http") 
-        ? `/api/stream?url=${encodeURIComponent(finalSrc)}`
-        : finalSrc;
-    } else {
-      // For standard MP4 videos (like proxy-melolo URLs from narto-drama.com),
-      // we MUST use the source as-is without any extraction or rewriting, 
-      // allowing standard HTML5 <video> to stream natively with authorization parameters (like kid) intact.
-      proxiedSrc = src;
     }
+    
+    // Always proxy external sources to forward cookies and solve cross-origin barriers
+    proxiedSrc = finalSrc.startsWith("http") 
+      ? `/api/stream?url=${encodeURIComponent(finalSrc)}`
+      : finalSrc;
 
-    // Secure async helper to execute play
+    // Unified helper to trigger play
     const triggerPlay = async () => {
       try {
         if (isCancelled) return;
@@ -110,6 +122,7 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
           await playPromise;
           if (!isCancelled) {
             setIsPlaying(true);
+            setIsVideoLoading(false);
           }
         }
       } catch (err: any) {
@@ -118,53 +131,124 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
         }
         if (!isCancelled) {
           setIsPlaying(false);
+          setIsVideoLoading(false);
         }
       }
     };
 
     const handleMetadata = () => {
+      if (isCancelled) return;
+      // Native playback succeeded - detach initialization error listeners
+      video.removeEventListener("error", handleNativeError);
+      video.removeEventListener("loadedmetadata", handleMetadata);
       triggerPlay();
     };
 
-    if (isHls && Hls.isSupported()) {
-      hls = new Hls({
-        maxMaxBufferLength: 10,
-        enableWorker: true,
-        xhrSetup: (xhr) => {
-          xhr.withCredentials = false;
-        }
-      });
-      
-      hls.loadSource(proxiedSrc);
-      hls.attachMedia(video);
-      
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        triggerPlay();
-      });
+    const initHls = () => {
+      if (isCancelled) return;
+      try {
+        video.removeAttribute("src");
+        video.load();
 
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        if (data.fatal) {
-          switch (data.type) {
-            case Hls.ErrorTypes.NETWORK_ERROR:
-              hls?.startLoad();
-              break;
-            case Hls.ErrorTypes.MEDIA_ERROR:
-              hls?.recoverMediaError();
-              break;
-            default:
-              if (!isCancelled) {
-                setErrorMsg("Gagal memuat video");
-              }
-              hls?.destroy();
-              break;
+        hls = new Hls({
+          maxMaxBufferLength: 10,
+          enableWorker: true,
+          xhrSetup: (xhr) => {
+            xhr.withCredentials = false;
           }
+        });
+        
+        hls.loadSource(proxiedSrc);
+        hls.attachMedia(video);
+        
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          triggerPlay();
+        });
+
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (data.fatal) {
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                hls?.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                hls?.recoverMediaError();
+                break;
+              default:
+                if (!isCancelled) {
+                  setErrorMsg("Video tidak dapat diputar.");
+                  alert("Pemberitahuan: Video tidak dapat diputar. Silakan coba episode lain.");
+                }
+                hls?.destroy();
+                break;
+            }
+          }
+        });
+      } catch (err) {
+        console.error("Gagal menginisiasi hls.js:", err);
+        if (!isCancelled) {
+          setErrorMsg("Video tidak dapat diputar.");
+          alert("Pemberitahuan: Video tidak dapat diputar. Silakan coba episode lain.");
         }
-      });
-    } else {
-      // Direct assignment for standard MP4 or Apple HLS
-      video.src = proxiedSrc;
-      video.addEventListener("loadedmetadata", handleMetadata);
-    }
+      }
+    };
+
+    const handleNativeError = (e: Event) => {
+      if (isCancelled) return;
+      
+      // Native playback failed - detach initialization error listeners immediately (this prevents secondary/abort errors from triggering again)
+      video.removeEventListener("error", handleNativeError);
+      video.removeEventListener("loadedmetadata", handleMetadata);
+
+      console.log("Pemutaran langsung gagal, mencoba fallback HLS.js jika didukung...", video.error);
+
+      if (isHls && Hls.isSupported()) {
+        initHls();
+      } else {
+        setErrorMsg("Video tidak dapat diputar.");
+        alert("Pemberitahuan: Video tidak dapat diputar. Silakan coba episode lain.");
+      }
+    };
+
+    // Listeners for buffer state updates
+    const handleWaiting = () => {
+      if (!isCancelled) setIsVideoLoading(true);
+    };
+    const handlePlaying = () => {
+      if (!isCancelled) {
+        setIsVideoLoading(false);
+        setIsPlaying(true);
+        if (onPlayingRef.current) {
+          onPlayingRef.current();
+        }
+      }
+    };
+    const handleSeeking = () => {
+      if (!isCancelled) setIsVideoLoading(true);
+    };
+    const handleSeeked = () => {
+      if (!isCancelled) setIsVideoLoading(false);
+    };
+    const handleCanPlay = () => {
+      if (!isCancelled) setIsVideoLoading(false);
+    };
+    const handleTimeUpdate = () => {
+      if (!isCancelled && video.currentTime > 0) {
+        setIsVideoLoading(false);
+      }
+    };
+
+    video.addEventListener("waiting", handleWaiting);
+    video.addEventListener("playing", handlePlaying);
+    video.addEventListener("seeking", handleSeeking);
+    video.addEventListener("seeked", handleSeeked);
+    video.addEventListener("canplay", handleCanPlay);
+    video.addEventListener("timeupdate", handleTimeUpdate);
+
+    // Prioritas: putar URL langsung tanpa melalui HLS.js terlebih dahulu
+    video.src = proxiedSrc;
+    video.addEventListener("loadedmetadata", handleMetadata);
+    video.addEventListener("error", handleNativeError);
 
     const handleEndedEvent = () => {
       if (onEndedRef.current) onEndedRef.current();
@@ -179,7 +263,16 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
         hls.destroy();
       }
       video.removeEventListener("loadedmetadata", handleMetadata);
+      video.removeEventListener("error", handleNativeError);
       video.removeEventListener("ended", handleEndedEvent);
+      
+      video.removeEventListener("waiting", handleWaiting);
+      video.removeEventListener("playing", handlePlaying);
+      video.removeEventListener("seeking", handleSeeking);
+      video.removeEventListener("seeked", handleSeeked);
+      video.removeEventListener("canplay", handleCanPlay);
+      video.removeEventListener("timeupdate", handleTimeUpdate);
+
       try {
         video.pause();
         video.removeAttribute("src");
@@ -329,6 +422,15 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded }: HlsPlayerProps) {
         webkit-playsinline="true"
       />
 
+      {/* Buffering/Loading Indicator */}
+      {isVideoLoading && !errorMsg && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 z-20 pointer-events-none transition-opacity duration-300">
+          <Loader2 className="w-8 h-8 animate-spin text-rose-500 mb-2" />
+          <span className="text-[10px] font-black text-rose-400 uppercase tracking-widest animate-pulse">Memuat Media / Buffering...</span>
+          <span className="text-[9px] text-slate-500 mt-1">Menyiapkan stream &amp; memecah segmen video</span>
+        </div>
+      )}
+
       {/* Speed acceleration overlay indicator */}
       {isSpeedingUp && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 bg-black/85 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-rose-500/35 flex items-center gap-1.5 shadow-lg shadow-rose-950/20 pointer-events-none animate-pulse">
@@ -369,6 +471,22 @@ export default function App() {
   // Headers Display Mode (Visible / Hidden toggle to satisfy "muncul atau hilang ketika di klik")
   const [isHudVisible, setIsHudVisible] = useState<boolean>(true);
 
+  // Diagnostics & detailed scraper logging
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
+  const diagnosticsTab = "logs";
+  const cfProxy = "";
+  const sessionCookies = "";
+  const getApiUrl = (path: string): string => path;
+  const backendLogs: any[] = [];
+  const scrapedHtmlInfo: any = null;
+  const isRefreshingLogs = false;
+  const isRefreshingHtml = false;
+  const copiedSuccess = false;
+
+  const fetchBackendLogs = async () => {};
+  const fetchScrapedHtml = async () => {};
+  const clearBackendLogs = async () => {};
+
   // Selected drama properties
   const [selectedDrama, setSelectedDrama] = useState<any>(null);
   const [selectedEp, setSelectedEp] = useState<number>(1);
@@ -385,6 +503,52 @@ export default function App() {
   const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
   const [isFetchingVideo, setIsFetchingVideo] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+
+  // Local URL cache to skip redundant API requests during the session
+  const [videoUrlLocalCache, setVideoUrlLocalCache] = useState<Record<string, string>>({});
+
+  // Watched history: drama slug -> list of watched episode numbers
+  const [watchedHistory, setWatchedHistory] = useState<Record<string, number[]>>(() => {
+    try {
+      const stored = localStorage.getItem("narto-watched-history");
+      return stored ? JSON.parse(stored) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  // Last watched episode: drama slug -> latest episode number
+  const [lastWatchedEpMap, setLastWatchedEpMap] = useState<Record<string, number>>(() => {
+    try {
+      const stored = localStorage.getItem("narto-last-watched-map");
+      return stored ? JSON.parse(stored) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const saveWatchedProgress = (slug: string, ep: number) => {
+    if (!slug) return;
+    
+    // 1. Persist last watched episode mapping
+    setLastWatchedEpMap(prev => {
+      const updated = { ...prev, [slug]: ep };
+      localStorage.setItem("narto-last-watched-map", JSON.stringify(updated));
+      return updated;
+    });
+
+    // 2. Persist comprehensive watched episode list
+    setWatchedHistory(prev => {
+      const list = prev[slug] || [];
+      if (!list.includes(ep)) {
+        const updatedList = [...list, ep];
+        const updated = { ...prev, [slug]: updatedList };
+        localStorage.setItem("narto-watched-history", JSON.stringify(updated));
+        return updated;
+      }
+      return prev;
+    });
+  };
 
   // Social Simulation states
   const [likesCount, setLikesCount] = useState<number>(128);
@@ -463,6 +627,8 @@ export default function App() {
   // Bootstrapping lists on mounting
   useEffect(() => {
     fetchDramas();
+    fetchBackendLogs();
+    fetchScrapedHtml();
   }, []);
 
   const fetchDramas = async (query: string = "") => {
@@ -501,7 +667,10 @@ export default function App() {
     setActiveView("player");
     setSelectedDrama(null);
     setPlaybackUrl(null);
-    setSelectedEp(1);
+    
+    // Auto-resume to the previous watched episode if saved
+    const savedEp = lastWatchedEpMap[drama.slug] || 1;
+    setSelectedEp(savedEp);
     
     // Generate lovely natural layout metadata
     setLikesCount(Math.floor((drama.title.length * 28) + 140));
@@ -515,8 +684,8 @@ export default function App() {
       const data = await res.json();
       setSelectedDrama({ ...data, slug: drama.slug });
       
-      // Load source on boot
-      await fetchVideoSource(drama.slug, 1);
+      // Load source on boot targeting the restored episode
+      await fetchVideoSource(drama.slug, savedEp);
     } catch (err) {
       console.error("Gagal memuat rincian drama:", err);
     } finally {
@@ -528,14 +697,49 @@ export default function App() {
     setIsFetchingVideo(true);
     setPlaybackUrl(null);
     
+    const cacheKey = `${slug}-${ep}`;
+    if (videoUrlLocalCache[cacheKey]) {
+      setPlaybackUrl(videoUrlLocalCache[cacheKey]);
+      setIsFetchingVideo(false);
+      saveWatchedProgress(slug, ep);
+      triggerPrefetch(slug, ep);
+      return;
+    }
+
     try {
       const res = await fetch(`/api/video?slug=${slug}&ep=${ep}`);
       const data = await res.json();
-      setPlaybackUrl(data.videoUrl);
+      
+      if (data.videoUrl) {
+        setPlaybackUrl(data.videoUrl);
+        setVideoUrlLocalCache(prev => ({
+          ...prev,
+          [cacheKey]: data.videoUrl
+        }));
+        saveWatchedProgress(slug, ep);
+      }
+      
+      triggerPrefetch(slug, ep);
     } catch (err) {
       console.error("Gagal memuat link video streaming m3u8:", err);
     } finally {
       setIsFetchingVideo(false);
+    }
+  };
+
+  const triggerPrefetch = (slug: string, ep: number) => {
+    if (selectedDrama) {
+      const nextEpisode = ep + 1;
+      const prevEpisode = ep - 1;
+      
+      // Cache next episode
+      if (nextEpisode <= selectedDrama.total_episodes) {
+        fetch(`/api/video?slug=${slug}&ep=${nextEpisode}`).catch(() => {});
+      }
+      // Cache previous episode for fluid backwards jumps
+      if (prevEpisode >= 1) {
+        fetch(`/api/video?slug=${slug}&ep=${prevEpisode}`).catch(() => {});
+      }
     }
   };
 
@@ -820,9 +1024,17 @@ export default function App() {
 
                     {/* Metadata detail rows */}
                     <div className="p-3.5 flex-1 flex flex-col justify-between gap-2">
-                      <h3 className="text-xs font-extrabold text-slate-100 group-hover:text-rose-400 transition-colors line-clamp-2 leading-snug">
-                        {drama.title}
-                      </h3>
+                      <div>
+                        <h3 className="text-xs font-extrabold text-slate-100 group-hover:text-rose-400 transition-colors line-clamp-2 leading-snug">
+                          {drama.title}
+                        </h3>
+                        {lastWatchedEpMap[drama.slug] && (
+                          <div className="flex items-center gap-1 mt-1 text-[9px] font-bold text-teal-400 bg-teal-500/5 px-1.5 py-0.5 rounded border border-teal-500/10 w-fit">
+                            <Check className="w-2.5 h-2.5 text-teal-400 shrink-0" />
+                            <span>Ditonton: Eps {lastWatchedEpMap[drama.slug]}</span>
+                          </div>
+                        )}
+                      </div>
                       
                       <div className="flex flex-wrap gap-1 mt-auto">
                         {drama.tags.slice(0, 2).map((tag, idx) => (
@@ -972,12 +1184,17 @@ export default function App() {
                       <p className="text-xs text-rose-400 font-bold tracking-tight animate-pulse">Menghubungkan HLS Proksi...</p>
                       <p className="text-[10px] text-slate-500 mt-2 max-w-[190px]">Menyisir initialSourceUrl bebas 502 secara aman</p>
                     </div>
-                  ) : playbackUrl ? (
+                                    ) : playbackUrl ? (
                     <HlsPlayer 
                       src={playbackUrl} 
                       poster={selectedDrama?.thumbnail} 
                       isMuted={isMuted}
                       onEnded={handleNextEp}
+                      onPlaying={() => {
+                        if (selectedDrama) {
+                          saveWatchedProgress(selectedDrama.slug, selectedEp);
+                        }
+                      }}
                     />
                   ) : (
                     <div className="absolute inset-0 bg-[#040508] flex flex-col items-center justify-center p-6 text-center text-slate-400 z-30">
@@ -1148,19 +1365,27 @@ export default function App() {
                       </div>
                     ) : (
                       <div className="grid grid-cols-4 gap-2">
-                        {selectedDrama?.episodes && selectedDrama.episodes.map((ep: any) => (
-                          <button
-                            key={ep.number}
-                            onClick={() => handleSelectEpisode(ep.number)}
-                            className={`cursor-pointer py-3 px-1 rounded-xl text-xs font-black font-sans transition-all text-center ${
-                              selectedEp === ep.number
-                                ? "bg-gradient-to-tr from-rose-600 to-amber-500 text-white shadow-lg shadow-rose-600/25 ring-1 ring-rose-400/30 scale-105"
-                                : "bg-slate-950/80 border border-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-850"
-                            }`}
-                          >
-                            {ep.number}
-                          </button>
-                        ))}
+                        {selectedDrama?.episodes && selectedDrama.episodes.map((ep: any) => {
+                          const isWatched = watchedHistory[selectedDrama.slug]?.includes(ep.number);
+                          return (
+                            <button
+                              key={ep.number}
+                              onClick={() => handleSelectEpisode(ep.number)}
+                              className={`cursor-pointer py-3 px-1 rounded-xl text-xs font-sans transition-all text-center relative font-black ${
+                                selectedEp === ep.number
+                                  ? "bg-gradient-to-tr from-rose-600 to-amber-500 text-white shadow-lg shadow-rose-600/25 ring-1 ring-rose-400/30 scale-105"
+                                  : "bg-slate-950/80 border border-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-850"
+                              }`}
+                            >
+                              <span className="relative inline-block">
+                                {ep.number}
+                                {isWatched && selectedEp !== ep.number && (
+                                  <span className="absolute -top-1 -right-1.5 w-1.5 h-1.5 bg-teal-400 rounded-full animate-pulse shadow-md shadow-teal-550" />
+                                )}
+                              </span>
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -1224,31 +1449,37 @@ export default function App() {
                 </div>
               ) : (
                 <div className="grid grid-cols-5 gap-2 pb-6">
-                  {selectedDrama?.episodes && selectedDrama.episodes.map((ep: any) => (
-                    <button
-                      key={ep.number}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleSelectEpisode(ep.number);
-                        setShowMobileEpisodes(false);
-                      }}
-                      className={`cursor-pointer py-3.5 text-xs font-black rounded-xl transition ${
-                        selectedEp === ep.number
-                          ? "bg-gradient-to-tr from-rose-600 to-amber-500 text-white"
-                          : "bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
-                      }`}
-                    >
-                      {ep.number}
-                    </button>
-                  ))}
+                  {selectedDrama?.episodes && selectedDrama.episodes.map((ep: any) => {
+                    const isWatched = watchedHistory[selectedDrama.slug]?.includes(ep.number);
+                    return (
+                      <button
+                        key={ep.number}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleSelectEpisode(ep.number);
+                          setShowMobileEpisodes(false);
+                        }}
+                        className={`cursor-pointer py-3.5 text-xs font-black rounded-xl transition relative ${
+                          selectedEp === ep.number
+                            ? "bg-gradient-to-tr from-rose-600 to-amber-500 text-white"
+                            : "bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        <span className="relative inline-block">
+                          {ep.number}
+                          {isWatched && selectedEp !== ep.number && (
+                            <span className="absolute -top-1 -right-1.5 w-1.5 h-1.5 bg-teal-400 rounded-full animate-pulse shadow shadow-teal-550" />
+                          )}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
           </div>
-
         </div>
       )}
-
     </div>
   );
 }
