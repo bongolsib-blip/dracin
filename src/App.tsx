@@ -37,6 +37,8 @@ import {
 } from "lucide-react";
 import Hls from "hls.js";
 
+const WORKER_BASE = "https://ancient-darkness-e578.wakeveh208.workers.dev";
+
 // ==========================================
 // VERTICAL PORTRAIT HLS PLAYER COMPONENT
 // Resolves: "The play() request was interrupted by a new load request"
@@ -47,9 +49,10 @@ interface HlsPlayerProps {
   isMuted?: boolean;
   onEnded?: () => void;
   onPlaying?: () => void;
+  sessionCookies?: string;
 }
 
-function HlsPlayer({ src, poster, isMuted = false, onEnded, onPlaying }: HlsPlayerProps) {
+function HlsPlayer({ src, poster, isMuted = false, onEnded, onPlaying, sessionCookies }: HlsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -110,7 +113,7 @@ function HlsPlayer({ src, poster, isMuted = false, onEnded, onPlaying }: HlsPlay
     
     // Always proxy external sources to forward cookies and solve cross-origin barriers
     proxiedSrc = finalSrc.startsWith("http") 
-      ? `/api/stream?url=${encodeURIComponent(finalSrc)}`
+      ? `${WORKER_BASE}/?url=${encodeURIComponent(finalSrc)}${sessionCookies ? `&cookies=${encodeURIComponent(sessionCookies)}` : ""}`
       : finalSrc;
 
     // Unified helper to trigger play
@@ -475,7 +478,7 @@ export default function App() {
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const diagnosticsTab = "logs";
   const cfProxy = "";
-  const sessionCookies = "";
+  const [sessionCookies, setSessionCookies] = useState<string>("");
   const getApiUrl = (path: string): string => path;
   const backendLogs: any[] = [];
   const scrapedHtmlInfo: any = null;
@@ -635,8 +638,8 @@ export default function App() {
     setIsLoadingList(true);
     try {
       const endpoint = query 
-        ? `/api/search?q=${encodeURIComponent(query)}`
-        : `/api/list?page=1`;
+        ? `${WORKER_BASE}/api/search?q=${encodeURIComponent(query)}`
+        : `${WORKER_BASE}/api/list?page=1`;
       
       const res = await fetch(endpoint);
       const data = await res.json();
@@ -680,7 +683,7 @@ export default function App() {
     setShowMobileEpisodes(false);
     
     try {
-      const res = await fetch(`/api/detail?slug=${drama.slug}`);
+      const res = await fetch(`${WORKER_BASE}/api/detail?slug=${drama.slug}`);
       const data = await res.json();
       setSelectedDrama({ ...data, slug: drama.slug });
       
@@ -707,8 +710,12 @@ export default function App() {
     }
 
     try {
-      const res = await fetch(`/api/video?slug=${slug}&ep=${ep}`);
+      const res = await fetch(`${WORKER_BASE}/api/video?slug=${slug}&ep=${ep}`);
       const data = await res.json();
+      
+      if (data.sessionCookies) {
+        setSessionCookies(data.sessionCookies);
+      }
       
       if (data.videoUrl) {
         setPlaybackUrl(data.videoUrl);
@@ -734,11 +741,11 @@ export default function App() {
       
       // Cache next episode
       if (nextEpisode <= selectedDrama.total_episodes) {
-        fetch(`/api/video?slug=${slug}&ep=${nextEpisode}`).catch(() => {});
+        fetch(`${WORKER_BASE}/api/video?slug=${slug}&ep=${nextEpisode}`).catch(() => {});
       }
       // Cache previous episode for fluid backwards jumps
       if (prevEpisode >= 1) {
-        fetch(`/api/video?slug=${slug}&ep=${prevEpisode}`).catch(() => {});
+        fetch(`${WORKER_BASE}/api/video?slug=${slug}&ep=${prevEpisode}`).catch(() => {});
       }
     }
   };
@@ -1190,6 +1197,7 @@ export default function App() {
                       poster={selectedDrama?.thumbnail} 
                       isMuted={isMuted}
                       onEnded={handleNextEp}
+                      sessionCookies={sessionCookies}
                       onPlaying={() => {
                         if (selectedDrama) {
                           saveWatchedProgress(selectedDrama.slug, selectedEp);
